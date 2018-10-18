@@ -35,6 +35,7 @@
 #include <wx/fileconf.h>
 
 #include "ocpn_plugin.h"
+#include "plugingl/pidc.h"
 
 #include "Sight.h"
 #include "transform_star.hpp"
@@ -132,9 +133,7 @@ using namespace astrolabe::vsop87d;
 /* calculate what position the body for this sight is directly over at a given time */ 
 void Sight::BodyLocation(wxDateTime time, double *lat, double *lon, double *ghaast, double *rad)
 {
-    astrolabe::globals::vsop87d_text_path = (const char *)GetpSharedDataLocation()->mb_str();
-    astrolabe::globals::vsop87d_text_path.append("plugins/celestial_navigation_pi/data/");
-    astrolabe::globals::vsop87d_text_path.append("vsop87d.txt");
+    static int error_message = 1;
 
     time.MakeFromUTC();
     double jdu = time.GetJulianDayNumber();
@@ -153,18 +152,21 @@ void Sight::BodyLocation(wxDateTime time, double *lat, double *lon, double *ghaa
         Sun sun;
         sun.dimension3(jdd, l, b, r);
     } catch (Error e) {
-        static bool showonce = false;
-        if(!showonce) {
+        if(error_message) {
+            error_message--;
             wxString err;
             const char *what = e.what();
             while(*what) err += *what++;
-            wxMessageDialog mdlg(NULL, _("Astrolab failed, data unavailable:\n")
-                                 + err + _("\nDid you forget to install vsop87d.txt?\n")
-                                 +_("The plugin will not work correctly"),
-                                 wxString(_("Failure Alert"), wxOK | wxICON_ERROR));
+            wxMessageDialog mdlg(NULL, _("vsop87d.txt missing or corrupt\n")
+                                 + err + _("The plugin will not work correctly"),
+                                 _("Failure Alert"), wxOK | wxICON_ERROR);
             mdlg.ShowModal();
-            showonce = true;
+            wxRemoveFile(astrolabe::globals::vsop87d_text_path);
         }
+        if(lat) *lat = 0;
+        if(lon) *lon = 0;
+        if(ghaast) *ghaast = 0;
+        if(rad) *rad = 0;
         return;
     }
 
@@ -389,7 +391,7 @@ wxRealPointList *Sight::ReduceToConvexPolygon(wxRealPointList *points)
 }
 
 /* Draw a polygon (specified in lat/lon coords) to dc given a list of points */
-void Sight::DrawPolygon(PlugIn_ViewPort &VP, wxRealPointList &area)
+void Sight::DrawPolygon(piDC &dc, PlugIn_ViewPort &vp, wxRealPointList &area)
 {
    int n = area.size();
    wxPoint *ppoints = new wxPoint[n];
@@ -405,7 +407,7 @@ void Sight::DrawPolygon(PlugIn_ViewPort &VP, wxRealPointList &area)
       wxPoint r;
 
       /* don't draw areas crossing opposite from center longitude */
-      double lon = (*it)->y - VP.clon;
+      double lon = (*it)->y - vp.clon;
       lon = resolve_heading_positive(lon);
 
       if(lon > 90 && lon <= 180)
@@ -420,21 +422,13 @@ void Sight::DrawPolygon(PlugIn_ViewPort &VP, wxRealPointList &area)
       maxx = wxMax(maxx, (*it)->x);
       maxy = wxMax(maxy, (*it)->y);
 
-      GetCanvasPixLL(&VP, &r, (*it)->x, (*it)->y);
+      GetCanvasPixLL(&vp, &r, (*it)->x, (*it)->y);
 
       ppoints[i] = r;
    }
 
-   if(!(rear1 && rear2)) {
-       if(m_dc)
-           m_dc->DrawPolygon(n, ppoints);
-       else {
-         glBegin(GL_POLYGON);
-         for(int i=n-1; i>=0; i--)
-             glVertex2i(ppoints[i].x, ppoints[i].y);
-         glEnd();
-       }
-   }
+   if(!(rear1 && rear2))
+       dc.DrawPolygon(n, ppoints);
 
    delete [] ppoints;
 }
@@ -446,33 +440,19 @@ double Sight::ComputeStepSize(double certainty, double stepsize, double min, dou
 }
 
 /* render the area of position for this sight */
-void Sight::Render( wxDC *dc, PlugIn_ViewPort &VP )
+void Sight::Render( piDC &dc, PlugIn_ViewPort &vp )
 {
     if ( !m_bVisible )
         return;
 
-    m_dc = dc;
-    
-    if(dc) {
-        dc->SetPen ( wxPen(m_Colour, 1) );
-        dc->SetBrush ( wxBrush(m_Colour) );
-    } else {
-        glColor4ub(m_Colour.Red(), m_Colour.Green(), m_Colour.Blue(), m_Colour.Alpha());
-        glPushAttrib(GL_COLOR_BUFFER_BIT | GL_POLYGON_BIT);      //Save state
-        
-        glEnable(GL_POLYGON_SMOOTH);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    }
+    dc.SetPen ( wxPen(m_Colour, 1) );
+    dc.SetBrush ( wxBrush(m_Colour) );
     
     std::list<wxRealPointList*>::iterator it = polygons.begin();
     while(it != polygons.end()) {
-        DrawPolygon(VP, **it);
+        DrawPolygon(dc, vp, **it);
         ++it;
     }
-    
-    if(!m_dc)
-        glPopAttrib();            // restore state
 }
 
 void Sight::Recompute(int clock_offset)
